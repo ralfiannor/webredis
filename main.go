@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -174,6 +175,13 @@ func listDatabases(c *gin.Context) {
 func listKeys(c *gin.Context) {
 	id := c.Param("id")
 	db := c.Param("db")
+	cursorStr := c.DefaultQuery("cursor", "0")
+	cursor, err := strconv.ParseUint(cursorStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid cursor value"})
+		return
+	}
+
 	client, exists := connections[id]
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Connection not found"})
@@ -186,10 +194,10 @@ func listKeys(c *gin.Context) {
 		return
 	}
 
-	// Get all keys
-	keys, err := client.Keys(c, "*").Result()
+	// Use SCAN instead of KEYS
+	keys, nextCursor, err := client.Scan(c, cursor, "*", 100).Result()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to scan keys: %v", err)})
 		return
 	}
 
@@ -214,7 +222,12 @@ func listKeys(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, keyInfo)
+	// Return the response in the expected format
+	c.JSON(http.StatusOK, gin.H{
+		"keys": keyInfo,
+		"nextCursor": strconv.FormatUint(nextCursor, 10),
+		"hasMore": nextCursor != 0,
+	})
 }
 
 func getKey(c *gin.Context) {

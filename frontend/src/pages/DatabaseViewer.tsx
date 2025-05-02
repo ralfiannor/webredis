@@ -211,6 +211,11 @@ const DatabaseViewer: React.FC = () => {
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [searchText, setSearchText] = useState('');
   const [autoExpandParent, setAutoExpandParent] = useState(true);
+  const [cursor, setCursor] = useState<string>('0');
+  const [hasMore, setHasMore] = useState<boolean>(false);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
+  const [isDetailModalVisible, setIsDetailModalVisible] = useState(false);
+  const [selectedKeyInfo, setSelectedKeyInfo] = useState<KeyInfo | null>(null);
 
   useEffect(() => {
     loadConnections();
@@ -226,16 +231,8 @@ const DatabaseViewer: React.FC = () => {
 
   useEffect(() => {
     if (selectedConnection && selectedDatabase !== undefined) {
-      setIsLoadingKeys(true);
-      loadKeys().finally(() => setIsLoadingKeys(false));
-      // Clear any existing intervals
-      return () => {
-        // Cleanup function to ensure no intervals are left running
-        const highestTimeoutId = setTimeout(";");
-        for (let i = 0; i < highestTimeoutId; i++) {
-          clearTimeout(i);
-        }
-      };
+      console.log('Connection or database changed, loading keys...'); // Debug log
+      loadKeys(false);
     }
   }, [selectedConnection, selectedDatabase]);
 
@@ -263,23 +260,55 @@ const DatabaseViewer: React.FC = () => {
     }
   };
 
-  const loadKeys = async () => {
+  const loadKeys = async (loadMore: boolean = false) => {
     try {
-      setIsLoadingKeys(true);
-      const data = await listKeys(selectedConnection, selectedDatabase);
-      console.log('Loaded keys:', data); // Debug log
-      setKeys(data);
+      if (!loadMore) {
+        setIsLoadingKeys(true);
+        setCursor('0');
+        setKeys([]); // Clear existing keys when loading fresh
+      } else {
+        setIsLoadingMore(true);
+      }
+
+      console.log('Loading keys with cursor:', cursor); // Debug log
+      const data = await listKeys(selectedConnection, selectedDatabase, cursor);
+      console.log('Received data:', data); // Debug log
+
+      if (!data || !data.keys) {
+        console.error('Invalid data format:', data);
+        message.error('Invalid response format from server');
+        return;
+      }
+
+      if (loadMore) {
+        setKeys(prevKeys => [...prevKeys, ...data.keys]);
+      } else {
+        setKeys(data.keys);
+      }
+
+      setCursor(data.nextCursor);
+      setHasMore(data.hasMore);
+
       // Only reset selected key and value when database changes
       if (selectedDatabase !== prevDatabaseRef.current) {
         setSelectedKey('');
         setKeyValue(null);
         prevDatabaseRef.current = selectedDatabase;
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error loading keys:', error); // Debug log
-      message.error('Failed to load keys');
+      if (error.response?.status === 500) {
+        message.error('Connection error. Please check your Redis connection.');
+        // Remove the problematic connection from the list
+        setConnections(prev => prev.filter(conn => conn !== selectedConnection));
+        setSelectedConnection('');
+      } else {
+        message.error('Failed to load keys');
+      }
+      setKeys([]); // Clear keys on error
     } finally {
       setIsLoadingKeys(false);
+      setIsLoadingMore(false);
     }
   };
 
@@ -289,6 +318,12 @@ const DatabaseViewer: React.FC = () => {
       const data = await getKey(selectedConnection, selectedDatabase, key);
       setKeyValue(data);
       setSelectedKey(key);
+      // Find the key info from the keys list
+      const keyInfo = keys.find(k => k.key === key);
+      if (keyInfo) {
+        setSelectedKeyInfo(keyInfo);
+        setIsDetailModalVisible(true);
+      }
     } catch (error) {
       message.error('Failed to load key value');
     } finally {
@@ -456,9 +491,7 @@ const DatabaseViewer: React.FC = () => {
       title: 'TTL',
       dataIndex: 'ttl',
       key: 'ttl',
-      render: (ttl: number) => (
-        ttl > 0 ? <TTLCountdown initialTTL={ttl} /> : formatTTL(ttl)
-      ),
+      render: (ttl: number) => formatTTL(ttl),
     },
     {
       title: 'Actions',
@@ -596,119 +629,180 @@ const DatabaseViewer: React.FC = () => {
                   <div style={{ textAlign: 'center', padding: '20px' }}>
                     Loading keys...
                   </div>
+                ) : keys.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '20px' }}>
+                    No keys found
+                  </div>
                 ) : (
-                  <Tree
-                    treeData={filteredTreeData}
-                    expandedKeys={expandedKeys}
-                    autoExpandParent={autoExpandParent}
-                    onExpand={(keys) => {
-                      setExpandedKeys(keys as string[]);
-                      setAutoExpandParent(false);
-                    }}
-                    showLine
-                    icon={(props: any) => {
-                      if (props.isLeaf) {
-                        return <FileOutlined style={{ color: '#1890ff' }} />;
-                      }
-                      return <FolderOutlined style={{ color: '#faad14' }} />;
-                    }}
-                    titleRender={(node: any) => (
-                      <div style={{ 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        gap: '8px',
-                        padding: '4px 0'
-                      }}>
-                        <span style={{ 
-                          fontWeight: node.type === 'folder' ? 'bold' : 'normal',
-                          color: searchText && node.title.toLowerCase().includes(searchText.toLowerCase()) ? '#1890ff' : 'inherit'
+                  <>
+                    <Tree
+                      treeData={filteredTreeData}
+                      expandedKeys={expandedKeys}
+                      autoExpandParent={autoExpandParent}
+                      onExpand={(keys) => {
+                        setExpandedKeys(keys as string[]);
+                        setAutoExpandParent(false);
+                      }}
+                      showLine
+                      icon={(props: any) => {
+                        if (props.isLeaf) {
+                          return <FileOutlined style={{ color: '#1890ff' }} />;
+                        }
+                        return <FolderOutlined style={{ color: '#faad14' }} />;
+                      }}
+                      titleRender={(node: any) => (
+                        <div style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '8px',
+                          padding: '4px 0'
                         }}>
-                          {node.title}
-                        </span>
-                        {node.type !== 'folder' && (
-                          <>
-                            <span style={{ color: '#999', fontSize: '12px' }}>
-                              ({formatKeyType(node.type)})
-                            </span>
-                            {node.ttl > 0 && <TTLCountdown initialTTL={node.ttl} />}
-                            <Button
-                              danger
-                              size="small"
-                              icon={<DeleteOutlined />}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteKey(node.key);
-                              }}
-                            />
-                          </>
-                        )}
+                          <span style={{ 
+                            fontWeight: node.type === 'folder' ? 'bold' : 'normal',
+                            color: searchText && node.title.toLowerCase().includes(searchText.toLowerCase()) ? '#1890ff' : 'inherit'
+                          }}>
+                            {node.title}
+                          </span>
+                          {node.type !== 'folder' && (
+                            <>
+                              <span style={{ color: '#999', fontSize: '12px' }}>
+                                ({formatKeyType(node.type)})
+                              </span>
+                              <span style={{ color: '#999', fontSize: '12px' }}>
+                                {formatTTL(node.ttl)}
+                              </span>
+                              <Button
+                                danger
+                                size="small"
+                                icon={<DeleteOutlined />}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteKey(node.key);
+                                }}
+                              />
+                            </>
+                          )}
+                        </div>
+                      )}
+                      onSelect={(selectedKeys) => {
+                        if (selectedKeys.length > 0) {
+                          const key = selectedKeys[0] as string;
+                          handleKeySelect(key);
+                        }
+                      }}
+                    />
+                    {hasMore && (
+                      <div style={{ textAlign: 'center', marginTop: '16px' }}>
+                        <Button 
+                          type="primary" 
+                          onClick={() => loadKeys(true)}
+                          loading={isLoadingMore}
+                        >
+                          Load More
+                        </Button>
                       </div>
                     )}
-                    onSelect={(selectedKeys) => {
-                      if (selectedKeys.length > 0) {
-                        const key = selectedKeys[0] as string;
-                        handleKeySelect(key);
-                      }
-                    }}
-                  />
+                  </>
                 )}
               </div>
             ) : (
-              <Table
-                columns={columns}
-                dataSource={keys}
-                rowKey="key"
-                loading={isLoadingKeys}
-              />
+              <>
+                {isLoadingKeys ? (
+                  <div style={{ textAlign: 'center', padding: '20px' }}>
+                    Loading keys...
+                  </div>
+                ) : keys.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '20px' }}>
+                    No keys found
+                  </div>
+                ) : (
+                  <>
+                    <Table
+                      columns={columns}
+                      dataSource={keys}
+                      rowKey="key"
+                      pagination={false}
+                    />
+                    {hasMore && (
+                      <div style={{ textAlign: 'center', marginTop: '16px' }}>
+                        <Button 
+                          type="primary" 
+                          onClick={() => loadKeys(true)}
+                          loading={isLoadingMore}
+                        >
+                          Load More
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
             )}
 
-            {selectedKey && keyValue && (
-              <Card 
-                title={`Key: ${selectedKey}`} 
-                style={{ marginTop: 16 }}
-                extra={
-                  !isEditing ? (
+            {/* Key Detail Modal */}
+            <Modal
+              title={`Key: ${selectedKey}`}
+              open={isDetailModalVisible}
+              onCancel={() => {
+                setIsDetailModalVisible(false);
+                setSelectedKeyInfo(null);
+              }}
+              footer={null}
+              width={800}
+            >
+              {selectedKeyInfo && keyValue && (
+                <div>
+                  <p>Type: {formatKeyType(keyValue.type)}</p>
+                  <p>TTL: {selectedKeyInfo.ttl > 0 ? <TTLCountdown initialTTL={selectedKeyInfo.ttl} /> : formatTTL(selectedKeyInfo.ttl)}</p>
+                  <div style={{ marginTop: '16px' }}>
+                    <pre style={{ 
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      maxHeight: '400px',
+                      overflow: 'auto',
+                      backgroundColor: '#f5f5f5',
+                      padding: '12px',
+                      borderRadius: '4px'
+                    }}>
+                      {formatKeyValue(keyValue.value, keyValue.type)}
+                    </pre>
+                  </div>
+                  <div style={{ marginTop: '16px', textAlign: 'right' }}>
                     <Button type="primary" onClick={handleEditValue}>
                       Edit Value
                     </Button>
-                  ) : (
-                    <Space>
-                      <Button onClick={handleCancelEdit}>Cancel</Button>
-                      <Button type="primary" onClick={handleSaveValue} loading={isLoading}>
-                        Save
-                      </Button>
-                    </Space>
-                  )
-                }
+                  </div>
+                </div>
+              )}
+            </Modal>
+
+            {/* Edit Value Modal */}
+            {isEditing && (
+              <Modal
+                title="Edit Value"
+                open={isEditing}
+                onCancel={handleCancelEdit}
+                footer={[
+                  <Button key="cancel" onClick={handleCancelEdit}>
+                    Cancel
+                  </Button>,
+                  <Button key="save" type="primary" onClick={handleSaveValue} loading={isLoading}>
+                    Save
+                  </Button>,
+                ]}
+                width={800}
               >
-                <p>Type: {formatKeyType(keyValue.type)}</p>
-                <p>TTL: {formatTTL(keys.find(k => k.key === selectedKey)?.ttl || -1)}</p>
-                {isEditing ? (
-                  <Input.TextArea
-                    value={editedValue}
-                    onChange={(e) => setEditedValue(e.target.value)}
-                    autoSize={{ minRows: 4, maxRows: 10 }}
-                    style={{
-                      fontFamily: 'monospace',
-                      fontSize: '14px',
-                      lineHeight: '1.5',
-                      marginTop: '16px',
-                    }}
-                  />
-                ) : (
-                  <pre style={{ 
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    maxHeight: '400px',
-                    overflow: 'auto',
-                    backgroundColor: '#f5f5f5',
-                    padding: '12px',
-                    borderRadius: '4px'
-                  }}>
-                    {formatKeyValue(keyValue.value, keyValue.type)}
-                  </pre>
-                )}
-              </Card>
+                <Input.TextArea
+                  value={editedValue}
+                  onChange={(e) => setEditedValue(e.target.value)}
+                  autoSize={{ minRows: 4, maxRows: 10 }}
+                  style={{
+                    fontFamily: 'monospace',
+                    fontSize: '14px',
+                    lineHeight: '1.5',
+                  }}
+                />
+              </Modal>
             )}
           </>
         ) : (

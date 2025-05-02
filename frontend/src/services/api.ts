@@ -24,9 +24,22 @@ export const listDatabases = async (id: string) => {
   return response.data;
 };
 
-export const listKeys = async (id: string, db: number): Promise<KeyInfo[]> => {
-  const response = await api.get(`/keys/${id}/${db}`);
-  return response.data;
+export interface KeyListResponse {
+  keys: KeyInfo[];
+  nextCursor: string;
+  hasMore: boolean;
+}
+
+export const listKeys = async (connectionId: string, db: number, cursor: string = '0'): Promise<KeyListResponse> => {
+  try {
+    console.log('Fetching keys:', { connectionId, db, cursor }); // Debug log
+    const response = await api.get(`/keys/${connectionId}/${db}?cursor=${cursor}`);
+    console.log('API Response:', response.data); // Debug log
+    return response.data;
+  } catch (error) {
+    console.error('API Error:', error); // Debug log
+    throw error;
+  }
 };
 
 export const getKey = async (id: string, db: number, key: string) => {
