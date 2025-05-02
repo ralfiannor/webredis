@@ -1,72 +1,85 @@
-# WebRedis - Redis Web Interface
+> [!NOTE]
+> This project build by AI. Feel free to modify and use this tool
 
-WebRedis is a web-based interface for managing Redis databases. This package contains everything needed to run the application. I build this with AI
+# WebRedis - Redis Web Management Interface
 
-## Prerequisites
-
-- Redis server running and accessible
-- Port 8080 available (or configure a different port)
-
-## Quick Start
-
-1. Start the application:
-   ```bash
-   ./webredis
-   ```
-
-2. Access the web interface at: http://localhost:8080
-
-## Configuration
-
-### Environment Variables
-
-- `PORT`: Set the port number (default: 8080)
-  ```bash
-  PORT=3000 ./webredis
-  ```
-
-### Data Storage
-
-- Redis connections are stored in `data/connections.db`
-- The database is automatically created on first run
-- Make sure the `data` directory is writable
+A modern web interface for managing Redis connections and data. Built with Go and React.
 
 ## Features
 
-- Connect to multiple Redis servers
-- Browse and manage Redis databases
+- Connect to local or remote Redis instances
+- View and manage Redis databases
+- Browse and search keys
 - View and edit key values
-- Set TTL (Time To Live) for keys
-- Execute custom Redis commands
-- Persistent connection storage
+- Support for different Redis data types (string, list, set, hash, zset)
 
-## Security Notes
+## Prerequisites
 
-1. By default, the application runs in debug mode. For production:
-   ```bash
-   GIN_MODE=release ./webredis
-   ```
+- Go 1.21 or later
+- Node.js 16 or later
+- Redis server (local or remote)
 
-2. The application trusts all proxies by default. For production, set trusted proxies:
-   ```bash
-   TRUSTED_PROXIES=127.0.0.1,::1 ./webredis
-   ```
+## Backend Setup
 
-## Troubleshooting
+1. Install Go dependencies:
+```bash
+go mod download
+```
 
-1. If the application fails to start:
-   - Check if the port is already in use
-   - Ensure Redis server is running
-   - Verify file permissions
+2. Run the backend server:
+```bash
+go run main.go
+```
 
-2. If connections are not saved:
-   - Check if the `data` directory is writable
-   - Verify SQLite database permissions
+The server will start on port 8080 by default. You can change the port by setting the `PORT` environment variable.
+
+## Frontend Setup
+
+1. Navigate to the frontend directory:
+```bash
+cd frontend
+```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Start the development server:
+```bash
+npm run dev
+```
+
+4. Build for production:
+```bash
+npm run build
+```
+
+## Usage
+
+1. Open your browser and navigate to `http://localhost:8080`
+2. Add a new Redis connection by providing:
+   - Host (default: localhost)
+   - Port (default: 6379)
+   - Password (if required)
+   - Database number
+3. Once connected, you can:
+   - Browse databases
+   - View keys and their values
+   - Add, edit, or delete keys
+   - Switch between different Redis instances
+
+## API Endpoints
+
+- `POST /api/connections` - Create a new Redis connection
+- `GET /api/connections` - List all connections
+- `DELETE /api/connections/:id` - Delete a connection
+- `GET /api/databases/:id` - List databases for a connection
+- `GET /api/keys/:id/:db` - List keys in a database
+- `GET /api/key/:id/:db/:key` - Get key value
+- `POST /api/key/:id/:db/:key` - Set key value
+- `DELETE /api/key/:id/:db/:key` - Delete key
 
 ## License
 
-This software is provided as-is under the MIT License.
-
-## Support
-
-For issues and feature requests, please visit the project repository. 
+MIT 
