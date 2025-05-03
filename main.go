@@ -16,6 +16,8 @@ import (
 )
 
 type RedisConnection struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	Password string `json:"password"`
@@ -115,12 +117,22 @@ func createConnection(c *gin.Context) {
 		return
 	}
 
-	connID := fmt.Sprintf("%s:%s", conn.Host, conn.Port)
-	connections[connID] = client
+	// Generate ID if not provided
+	if conn.ID == "" {
+		conn.ID = fmt.Sprintf("%s:%s", conn.Host, conn.Port)
+	}
+
+	// Set default name if not provided
+	if conn.Name == "" {
+		conn.Name = conn.ID
+	}
+
+	connections[conn.ID] = client
 
 	// Save connection to database
 	dbConn := Connection{
-		ID:       connID,
+		ID:       conn.ID,
+		Name:     conn.Name,
 		Host:     conn.Host,
 		Port:     conn.Port,
 		Password: conn.Password,
@@ -130,13 +142,26 @@ func createConnection(c *gin.Context) {
 		log.Printf("Warning: Failed to save connection to database: %v", err)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"id": connID})
+	c.JSON(http.StatusOK, conn)
 }
 
 func listConnections(c *gin.Context) {
-	conns := make([]string, 0, len(connections))
+	conns := make([]RedisConnection, 0, len(connections))
 	for id := range connections {
-		conns = append(conns, id)
+		// Get connection details from database
+		conn, err := getConnectionFromDB(id)
+		if err != nil {
+			log.Printf("Warning: Failed to get connection details from database: %v", err)
+			continue
+		}
+		conns = append(conns, RedisConnection{
+			ID:       conn.ID,
+			Name:     conn.Name,
+			Host:     conn.Host,
+			Port:     conn.Port,
+			Password: conn.Password,
+			DB:       conn.DB,
+		})
 	}
 	c.JSON(http.StatusOK, conns)
 }
@@ -176,9 +201,17 @@ func listKeys(c *gin.Context) {
 	id := c.Param("id")
 	db := c.Param("db")
 	cursorStr := c.DefaultQuery("cursor", "0")
+	batchSizeStr := c.DefaultQuery("batchSize", "5000") // Increased default batch size
+
 	cursor, err := strconv.ParseUint(cursorStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid cursor value"})
+		return
+	}
+
+	batchSize, err := strconv.ParseInt(batchSizeStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid batch size"})
 		return
 	}
 
@@ -194,39 +227,76 @@ func listKeys(c *gin.Context) {
 		return
 	}
 
-	// Use SCAN instead of KEYS
-	keys, nextCursor, err := client.Scan(c, cursor, "*", 100).Result()
+	// Use SCAN with a larger count
+	keys, nextCursor, err := client.Scan(c, cursor, "*", batchSize).Result()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to scan keys: %v", err)})
 		return
 	}
 
-	// Get TTL and type for each key
+	// Get TTL and type for each key in parallel using goroutines
 	keyInfo := make([]map[string]interface{}, len(keys))
-	for i, key := range keys {
-		ttl, err := client.TTL(c, key).Result()
-		if err != nil {
-			ttl = -2 // Error value
+	type result struct {
+		index int
+		info  map[string]interface{}
+	}
+	resultChan := make(chan result, len(keys))
+	errorChan := make(chan error, 1)
+
+	// Process keys in batches to avoid overwhelming the Redis server
+	const workerCount = 10
+	keysPerWorker := len(keys) / workerCount
+	if keysPerWorker < 1 {
+		keysPerWorker = 1
+	}
+
+	for i := 0; i < len(keys); i += keysPerWorker {
+		end := i + keysPerWorker
+		if end > len(keys) {
+			end = len(keys)
 		}
 
-		// Get key type
-		keyType, err := client.Type(c, key).Result()
-		if err != nil {
-			keyType = "unknown"
-		}
+		go func(start, end int) {
+			for j := start; j < end; j++ {
+				key := keys[j]
+				ttl, err := client.TTL(c, key).Result()
+				if err != nil {
+					ttl = -2 // Error value
+				}
 
-		keyInfo[i] = map[string]interface{}{
-			"key":  key,
-			"ttl":  ttl.Seconds(),
-			"type": keyType,
+				keyType, err := client.Type(c, key).Result()
+				if err != nil {
+					keyType = "unknown"
+				}
+
+				resultChan <- result{
+					index: j,
+					info: map[string]interface{}{
+						"key":  key,
+						"ttl":  ttl.Seconds(),
+						"type": keyType,
+					},
+				}
+			}
+		}(i, end)
+	}
+
+	// Collect results
+	for i := 0; i < len(keys); i++ {
+		select {
+		case res := <-resultChan:
+			keyInfo[res.index] = res.info
+		case err := <-errorChan:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get key info: %v", err)})
+			return
 		}
 	}
 
 	// Return the response in the expected format
 	c.JSON(http.StatusOK, gin.H{
-		"keys": keyInfo,
+		"keys":       keyInfo,
 		"nextCursor": strconv.FormatUint(nextCursor, 10),
-		"hasMore": nextCursor != 0,
+		"hasMore":    nextCursor != 0,
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 
 type Connection struct {
 	ID       string
+	Name     string
 	Host     string
 	Port     string
 	Password string
@@ -37,6 +38,7 @@ func initDB() error {
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS connections (
 		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
 		host TEXT NOT NULL,
 		port TEXT NOT NULL,
 		password TEXT,
@@ -53,15 +55,15 @@ func initDB() error {
 
 func saveConnection(conn Connection) error {
 	query := `
-	INSERT OR REPLACE INTO connections (id, host, port, password, db)
-	VALUES (?, ?, ?, ?, ?)`
+	INSERT OR REPLACE INTO connections (id, name, host, port, password, db)
+	VALUES (?, ?, ?, ?, ?, ?)`
 
-	_, err := db.Exec(query, conn.ID, conn.Host, conn.Port, conn.Password, conn.DB)
+	_, err := db.Exec(query, conn.ID, conn.Name, conn.Host, conn.Port, conn.Password, conn.DB)
 	return err
 }
 
 func loadConnections() ([]Connection, error) {
-	query := `SELECT id, host, port, password, db FROM connections`
+	query := `SELECT id, name, host, port, password, db FROM connections`
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
@@ -71,7 +73,7 @@ func loadConnections() ([]Connection, error) {
 	var connections []Connection
 	for rows.Next() {
 		var conn Connection
-		err := rows.Scan(&conn.ID, &conn.Host, &conn.Port, &conn.Password, &conn.DB)
+		err := rows.Scan(&conn.ID, &conn.Name, &conn.Host, &conn.Port, &conn.Password, &conn.DB)
 		if err != nil {
 			return nil, err
 		}
@@ -85,4 +87,14 @@ func deleteConnectionFromDB(id string) error {
 	query := `DELETE FROM connections WHERE id = ?`
 	_, err := db.Exec(query, id)
 	return err
-} 
+}
+
+func getConnectionFromDB(id string) (Connection, error) {
+	query := `SELECT id, name, host, port, password, db FROM connections WHERE id = ?`
+	var conn Connection
+	err := db.QueryRow(query, id).Scan(&conn.ID, &conn.Name, &conn.Host, &conn.Port, &conn.Password, &conn.DB)
+	if err != nil {
+		return Connection{}, err
+	}
+	return conn, nil
+}

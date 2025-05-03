@@ -1,7 +1,9 @@
 export interface RedisConnection {
+  id: string;
+  name: string;
   host: string;
   port: string;
-  password: string;
+  password?: string;
   db: number;
 }
 
@@ -19,6 +21,7 @@ export interface DatabaseInfo {
 
 export interface ConnectionState {
   id: string;
+  name: string;
   host: string;
   port: string;
   isConnected: boolean;

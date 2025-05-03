@@ -16,10 +16,11 @@ const ConnectionManager: React.FC = () => {
   const loadConnections = async () => {
     try {
       const data = await listConnections();
-      setConnections(data.map((id: string) => ({
-        id,
-        host: id.split(':')[0],
-        port: id.split(':')[1],
+      setConnections(data.map((conn: RedisConnection) => ({
+        id: conn.id,
+        name: conn.name,
+        host: conn.host,
+        port: conn.port,
         isConnected: true,
       })));
     } catch (error) {
@@ -76,7 +77,7 @@ const ConnectionManager: React.FC = () => {
               ]}
             >
               <List.Item.Meta
-                title={`${connection.host}:${connection.port}`}
+                title={connection.name || `${connection.host}:${connection.port}`}
                 description={connection.isConnected ? 'Connected' : 'Disconnected'}
               />
             </List.Item>
@@ -96,6 +97,13 @@ const ConnectionManager: React.FC = () => {
           onFinish={handleAddConnection}
           initialValues={{ host: 'localhost', port: '6379', db: 0 }}
         >
+          <Form.Item
+            name="name"
+            label="Connection Name"
+            rules={[{ required: true, message: 'Please input a connection name!' }]}
+          >
+            <Input placeholder="e.g., Production Redis" />
+          </Form.Item>
           <Form.Item
             name="host"
             label="Host"

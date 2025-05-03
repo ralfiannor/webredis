@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Card, Select, Table, Button, Modal, Form, Input, message, Space, Typography, Tree } from 'antd';
 import { DeleteOutlined, PlusOutlined, CodeOutlined, FolderOutlined, FileOutlined } from '@ant-design/icons';
 import { listConnections, listDatabases, listKeys, getKey, setKey, deleteKey, executeCommand } from '../services/api';
@@ -151,72 +151,67 @@ const formatKeyValue = (value: any, type: string) => {
   }
 };
 
-// Helper function to build a tree structure from keys
-const buildKeyTree = (keys: KeyInfo[]): any[] => {
-  const tree: any = {};
-  
-  keys.forEach(key => {
-    const parts = key.key.split(':');
-    let current = tree;
-    
-    parts.forEach((part, index) => {
-      if (!current[part]) {
-        current[part] = {
-          key: parts.slice(0, index + 1).join(':'),
-          children: {},
-          type: index === parts.length - 1 ? key.type : 'folder',
-          ttl: index === parts.length - 1 ? key.ttl : -1,
-        };
-      }
-      current = current[part].children;
-    });
-  });
-
-  // Convert the tree to an array
-  const convertToArray = (node: any): any[] => {
-    return Object.entries(node).map(([key, value]: [string, any]) => ({
-      key: value.key,
-      title: key,
-      type: value.type,
-      ttl: value.ttl,
-      isLeaf: value.type !== 'folder',
-      children: Object.keys(value.children).length > 0 ? convertToArray(value.children) : undefined,
-    }));
-  };
-
-  return convertToArray(tree);
-};
+interface Connection {
+  id: string;
+  name: string;
+}
 
 const DatabaseViewer: React.FC = () => {
-  const [connections, setConnections] = useState<string[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
   const [selectedConnection, setSelectedConnection] = useState<string>('');
   const [databases, setDatabases] = useState<number[]>([]);
   const [selectedDatabase, setSelectedDatabase] = useState<number>(0);
   const [keys, setKeys] = useState<KeyInfo[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isLoadingKeys, setIsLoadingKeys] = useState<boolean>(false);
+  const [isLoadingDatabases, setIsLoadingDatabases] = useState<boolean>(false);
   const [selectedKey, setSelectedKey] = useState<string>('');
   const [keyValue, setKeyValue] = useState<KeyValue | null>(null);
-  const [isModalVisible, setIsModalVisible] = useState(false);
+  const [selectedKeyInfo, setSelectedKeyInfo] = useState<KeyInfo | null>(null);
+  const [isModalVisible, setIsModalVisible] = useState<boolean>(false);
+  const [isDetailModalVisible, setIsDetailModalVisible] = useState<boolean>(false);
   const [form] = Form.useForm();
-  const [command, setCommand] = useState('');
+  const [showTree, setShowTree] = useState<boolean>(true);
+  const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
+  const [command, setCommand] = useState<string>('');
   const [commandArgs, setCommandArgs] = useState<string[]>(['']);
   const [commandResult, setCommandResult] = useState<any>(null);
-  const [isCommandModalVisible, setIsCommandModalVisible] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isLoadingDatabases, setIsLoadingDatabases] = useState(false);
-  const [isLoadingKeys, setIsLoadingKeys] = useState(false);
-  const prevDatabaseRef = React.useRef<number | undefined>(undefined);
-  const [isEditing, setIsEditing] = useState(false);
+  const [isCommandModalVisible, setIsCommandModalVisible] = useState<boolean>(false);
+  const [isEditing, setIsEditing] = useState<boolean>(false);
   const [editedValue, setEditedValue] = useState<string>('');
-  const [showTree, setShowTree] = useState(false);
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-  const [searchText, setSearchText] = useState('');
-  const [autoExpandParent, setAutoExpandParent] = useState(true);
+  const prevDatabaseRef = useRef<number | undefined>(undefined);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [cursor, setCursor] = useState<string>('0');
-  const [hasMore, setHasMore] = useState<boolean>(false);
-  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
-  const [isDetailModalVisible, setIsDetailModalVisible] = useState(false);
-  const [selectedKeyInfo, setSelectedKeyInfo] = useState<KeyInfo | null>(null);
+  const [hasMore, setHasMore] = useState<boolean>(true);
+  const [searchText, setSearchText] = useState<string>('');
+  const [messageApi, contextHolder] = message.useMessage();
 
+  // Optimize message handling with minimal updates
+  const showMessage = useMemo(() => {
+    let messageTimeout: NodeJS.Timeout | null = null;
+    const MESSAGE_DELAY = 500; // Increased delay to prevent rapid updates
+
+    return {
+      success: (content: string) => {
+        if (messageTimeout) {
+          clearTimeout(messageTimeout);
+        }
+        messageTimeout = setTimeout(() => {
+          messageApi.success(content);
+        }, MESSAGE_DELAY);
+      },
+      error: (content: string) => {
+        if (messageTimeout) {
+          clearTimeout(messageTimeout);
+        }
+        messageTimeout = setTimeout(() => {
+          messageApi.error(content);
+        }, MESSAGE_DELAY);
+      }
+    };
+  }, [messageApi]);
+
+  // Add useEffect to load connections on mount
   useEffect(() => {
     loadConnections();
   }, []);
@@ -231,8 +226,7 @@ const DatabaseViewer: React.FC = () => {
 
   useEffect(() => {
     if (selectedConnection && selectedDatabase !== undefined) {
-      console.log('Connection or database changed, loading keys...'); // Debug log
-      loadKeys(false);
+      loadKeys();
     }
   }, [selectedConnection, selectedDatabase]);
 
@@ -242,7 +236,7 @@ const DatabaseViewer: React.FC = () => {
       const data = await listConnections();
       setConnections(data);
     } catch (error) {
-      message.error('Failed to load connections');
+      showMessage.error('Failed to load connections');
     } finally {
       setIsLoading(false);
     }
@@ -254,7 +248,7 @@ const DatabaseViewer: React.FC = () => {
       const data = await listDatabases(selectedConnection);
       setDatabases(data);
     } catch (error) {
-      message.error('Failed to load databases');
+      showMessage.error('Failed to load databases');
     } finally {
       setIsLoadingDatabases(false);
     }
@@ -262,21 +256,10 @@ const DatabaseViewer: React.FC = () => {
 
   const loadKeys = async (loadMore: boolean = false) => {
     try {
-      if (!loadMore) {
-        setIsLoadingKeys(true);
-        setCursor('0');
-        setKeys([]); // Clear existing keys when loading fresh
-      } else {
-        setIsLoadingMore(true);
-      }
-
-      console.log('Loading keys with cursor:', cursor); // Debug log
-      const data = await listKeys(selectedConnection, selectedDatabase, cursor);
-      console.log('Received data:', data); // Debug log
-
+      setIsLoadingKeys(true);
+      const data = await listKeys(selectedConnection, selectedDatabase, loadMore ? cursor : '0', 1000);
       if (!data || !data.keys) {
-        console.error('Invalid data format:', data);
-        message.error('Invalid response format from server');
+        showMessage.error('Invalid response format from server');
         return;
       }
 
@@ -289,26 +272,24 @@ const DatabaseViewer: React.FC = () => {
       setCursor(data.nextCursor);
       setHasMore(data.hasMore);
 
-      // Only reset selected key and value when database changes
       if (selectedDatabase !== prevDatabaseRef.current) {
         setSelectedKey('');
         setKeyValue(null);
         prevDatabaseRef.current = selectedDatabase;
       }
     } catch (error: any) {
-      console.error('Error loading keys:', error); // Debug log
       if (error.response?.status === 500) {
-        message.error('Connection error. Please check your Redis connection.');
-        // Remove the problematic connection from the list
-        setConnections(prev => prev.filter(conn => conn !== selectedConnection));
+        showMessage.error('Connection error. Please check your Redis connection.');
+        setConnections(prev => prev.filter(conn => conn.id !== selectedConnection));
         setSelectedConnection('');
       } else {
-        message.error('Failed to load keys');
+        showMessage.error('Failed to load keys');
       }
-      setKeys([]); // Clear keys on error
+      if (!loadMore) {
+        setKeys([]);
+      }
     } finally {
       setIsLoadingKeys(false);
-      setIsLoadingMore(false);
     }
   };
 
@@ -318,14 +299,13 @@ const DatabaseViewer: React.FC = () => {
       const data = await getKey(selectedConnection, selectedDatabase, key);
       setKeyValue(data);
       setSelectedKey(key);
-      // Find the key info from the keys list
       const keyInfo = keys.find(k => k.key === key);
       if (keyInfo) {
         setSelectedKeyInfo(keyInfo);
         setIsDetailModalVisible(true);
       }
     } catch (error) {
-      message.error('Failed to load key value');
+      showMessage.error('Failed to load key value');
     } finally {
       setIsLoading(false);
     }
@@ -335,15 +315,15 @@ const DatabaseViewer: React.FC = () => {
     try {
       setIsLoading(true);
       await deleteKey(selectedConnection, selectedDatabase, key);
-      message.success('Key deleted successfully');
-      // Update keys list without full refresh
+      showMessage.success('Key deleted successfully');
       setKeys(prevKeys => prevKeys.filter(k => k.key !== key));
       if (selectedKey === key) {
         setSelectedKey('');
         setKeyValue(null);
+        setIsDetailModalVisible(false);
       }
     } catch (error) {
-      message.error('Failed to delete key');
+      showMessage.error('Failed to delete key');
     } finally {
       setIsLoading(false);
     }
@@ -357,10 +337,9 @@ const DatabaseViewer: React.FC = () => {
         value: values.value,
         ttl: values.ttl ? parseInt(values.ttl) : 0,
       });
-      message.success('Key saved successfully');
+      showMessage.success('Key saved successfully');
       setIsModalVisible(false);
       form.resetFields();
-      // Update keys list without full refresh
       const newKey: KeyInfo = {
         key: values.key,
         ttl: values.ttl ? parseInt(values.ttl) : -1,
@@ -376,7 +355,7 @@ const DatabaseViewer: React.FC = () => {
         return [...prevKeys, newKey];
       });
     } catch (error) {
-      message.error('Failed to save key');
+      showMessage.error('Failed to save key');
     } finally {
       setIsLoading(false);
     }
@@ -388,14 +367,12 @@ const DatabaseViewer: React.FC = () => {
       const args = commandArgs.filter(arg => arg.trim() !== '');
       const result = await executeCommand(selectedConnection, selectedDatabase, command, args);
       setCommandResult(result);
-      message.success('Command executed successfully');
-      // Only refresh keys if the command might have modified them
+      showMessage.success('Command executed successfully');
       if (['DEL', 'SET', 'EXPIRE', 'PERSIST', 'RENAME', 'MOVE'].includes(command.toUpperCase())) {
         loadKeys();
       }
     } catch (error) {
-      message.error('Failed to execute command');
-      console.error('Command execution error:', error);
+      showMessage.error('Failed to execute command');
     } finally {
       setIsLoading(false);
     }
@@ -429,37 +406,31 @@ const DatabaseViewer: React.FC = () => {
       setIsLoading(true);
       let valueToSave = editedValue;
 
-      // If the value looks like JSON, try to parse and stringify it to ensure valid JSON
       if (editedValue.trim().startsWith('{') || editedValue.trim().startsWith('[')) {
         try {
           const parsed = JSON.parse(editedValue);
           valueToSave = JSON.stringify(parsed);
         } catch (error) {
           // If it's not valid JSON, keep the original value
-          console.warn('Value is not valid JSON, saving as string');
         }
       }
 
-      // Get the current TTL value
       const currentKey = keys.find(k => k.key === selectedKey);
       const ttl = currentKey?.ttl || 0;
       
-      // Format the request body according to what the backend expects
       const requestBody = {
         type: keyValue?.type || 'string',
         value: valueToSave,
-        ttl: Math.max(0, Math.floor(ttl)), // Ensure TTL is a non-negative integer
+        ttl: Math.max(0, Math.floor(ttl)),
       };
 
       await setKey(selectedConnection, selectedDatabase, selectedKey, requestBody);
-      message.success('Value updated successfully');
+      showMessage.success('Value updated successfully');
       setIsEditing(false);
-      // Refresh the key value
       const data = await getKey(selectedConnection, selectedDatabase, selectedKey);
       setKeyValue(data);
     } catch (error) {
-      console.error('Error saving value:', error);
-      message.error('Failed to update value');
+      showMessage.error('Failed to update value');
     } finally {
       setIsLoading(false);
     }
@@ -493,58 +464,201 @@ const DatabaseViewer: React.FC = () => {
       key: 'ttl',
       render: (ttl: number) => formatTTL(ttl),
     },
-    {
-      title: 'Actions',
-      key: 'actions',
-      render: (_: any, record: KeyInfo) => (
-        <Button
-          danger
-          icon={<DeleteOutlined />}
-          onClick={() => handleDeleteKey(record.key)}
-        />
-      ),
-    },
   ];
 
-  const treeData = useMemo(() => buildKeyTree(keys), [keys]);
+  // Add filtered keys based on search
+  const filteredKeys = useMemo(() => {
+    if (!searchText) return keys;
+    return keys.filter(key => 
+      key.key.toLowerCase().includes(searchText.toLowerCase())
+    );
+  }, [keys, searchText]);
 
-  const filteredTreeData = useMemo(() => {
-    if (!searchText) return treeData;
-
-    const searchLower = searchText.toLowerCase();
-    const expandedKeysSet = new Set<string>();
-
-    const filterNode = (node: any): any | null => {
-      const title = node.title.toLowerCase();
-      const matches = title.includes(searchLower);
+  // Memoize the tree data with optimized structure
+  const treeData = useMemo(() => {
+    const buildTree = (keys: KeyInfo[]): any[] => {
+      const tree: { [key: string]: any } = {};
       
-      if (matches) {
-        // Add all parent keys to expanded set
-        const parts = node.key.split(':');
-        let currentKey = '';
-        parts.forEach((part: string) => {
-          currentKey = currentKey ? `${currentKey}:${part}` : part;
-          expandedKeysSet.add(currentKey);
-        });
+      // Pre-allocate arrays for better performance
+      const keyArray = Array.isArray(keys) ? keys : [];
+      
+      for (let i = 0; i < keyArray.length; i++) {
+        const key = keyArray[i];
+        const parts = key.key.split(':');
+        let current = tree;
+        let path = '';
+        
+        for (let j = 0; j < parts.length; j++) {
+          const part = parts[j];
+          path = path ? `${path}:${part}` : part;
+          const isLast = j === parts.length - 1;
+          
+          if (!current[part]) {
+            current[part] = {
+              title: isLast ? path : `${part} (0)`,
+              key: path,
+              isLeaf: isLast,
+              type: isLast ? key.type : 'folder',
+              ttl: isLast ? key.ttl : -1,
+              children: isLast ? undefined : {},
+              count: 0
+            };
+          } else if (!isLast) {
+            current[part].count++;
+          }
+          
+          if (!isLast) {
+            current = current[part].children;
+          }
+        }
       }
 
-      const children = node.children?.map(filterNode).filter(Boolean);
-      if (matches || (children && children.length > 0)) {
-        return {
-          ...node,
-          children: children?.length ? children : undefined
-        };
-      }
-      return null;
+      const convertToArray = (obj: { [key: string]: any }): any[] => {
+        const result: any[] = [];
+        for (const [, value] of Object.entries(obj)) {
+          result.push({
+            ...value,
+            title: value.isLeaf ? value.title : `${value.title.split(' (')[0]} (${value.count} keys)`,
+            children: value.children ? convertToArray(value.children) : undefined
+          });
+        }
+        return result;
+      };
+
+      return convertToArray(tree);
     };
 
-    const filtered = treeData.map(filterNode).filter(Boolean);
-    setExpandedKeys(Array.from(expandedKeysSet));
-    return filtered;
-  }, [treeData, searchText]);
+    return buildTree(filteredKeys);
+  }, [filteredKeys]);
+
+  // Memoize the tree component with optimized event handling
+  const TreeComponent = useMemo(() => {
+    const handleExpand = useCallback((keys: React.Key[]) => {
+      setExpandedKeys(keys);
+    }, []);
+
+    const handleSelect = useCallback((selectedKeys: React.Key[], info: any) => {
+      if (info.node.isLeaf) {
+        handleKeySelect(selectedKeys[0] as string);
+      }
+    }, [handleKeySelect]);
+
+    const handleTitleClick = useCallback((e: React.MouseEvent, nodeData: any) => {
+      e.stopPropagation();
+      if (nodeData.isLeaf) {
+        handleKeySelect(nodeData.key);
+      }
+    }, [handleKeySelect]);
+
+    return (
+      <Tree
+        treeData={treeData}
+        showLine={true}
+        blockNode={true}
+        expandedKeys={expandedKeys}
+        onExpand={handleExpand}
+        onSelect={handleSelect}
+        icon={(props: any) => {
+          if (props.isLeaf) {
+            return <FileOutlined style={{ color: '#1890ff' }} />;
+          }
+          return <FolderOutlined style={{ color: '#faad14' }} />;
+        }}
+        titleRender={(nodeData: any) => (
+          <span 
+            onClick={(e) => handleTitleClick(e, nodeData)}
+            style={{ 
+              cursor: 'pointer',
+              display: 'block',
+              width: '100%',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
+            {nodeData.isLeaf ? nodeData.title : (
+              <>
+                {nodeData.title.split(' (')[0]}
+                <span style={{ color: '#999' }}> ({nodeData.count} keys)</span>
+              </>
+            )}
+          </span>
+        )}
+      />
+    );
+  }, [treeData, expandedKeys, handleKeySelect]);
+
+  // Optimize the tree view container with minimal re-renders
+  const treeView = useMemo(() => {
+    const handleLoadMore = useCallback(() => {
+      loadKeys(true);
+    }, [loadKeys]);
+
+    return (
+      <div 
+        ref={containerRef}
+        style={{ 
+          backgroundColor: '#fff', 
+          padding: '16px', 
+          borderRadius: '4px',
+          border: '1px solid #f0f0f0',
+          maxHeight: '600px',
+          overflow: 'auto'
+        }}
+      >
+        {isLoadingKeys && !keys.length ? (
+          <div style={{ textAlign: 'center', padding: '20px' }}>
+            <div>Loading keys...</div>
+            <div style={{ marginTop: '10px', color: '#666' }}>
+              This may take a few moments depending on the number of keys
+            </div>
+          </div>
+        ) : keys.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '20px' }}>
+            No keys found
+          </div>
+        ) : (
+          <>
+            <div style={{ 
+              marginBottom: '16px', 
+              color: '#666',
+              position: 'sticky',
+              top: 0,
+              backgroundColor: '#fff',
+              zIndex: 1,
+              padding: '8px 0'
+            }}>
+              Total Keys: {keys.length} scanned
+            </div>
+            {TreeComponent}
+            {hasMore && (
+              <div style={{ 
+                textAlign: 'left', 
+                marginTop: '16px',
+                position: 'sticky',
+                bottom: 0,
+                backgroundColor: '#fff',
+                zIndex: 1,
+                padding: '8px 0'
+              }}>
+                <Button 
+                  type="primary" 
+                  onClick={handleLoadMore}
+                  loading={isLoadingKeys}
+                >
+                  Scan More
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }, [isLoadingKeys, keys.length, hasMore, TreeComponent, loadKeys]);
 
   return (
-    <div>
+    <div style={{ padding: '24px' }}>
+      {contextHolder}
       <Card title="Database Viewer">
         <div style={{ marginBottom: 16 }}>
           <Select
@@ -555,8 +669,8 @@ const DatabaseViewer: React.FC = () => {
             loading={isLoading}
           >
             {connections.map((conn) => (
-              <Select.Option key={conn} value={conn}>
-                {conn}
+              <Select.Option key={conn.id} value={conn.id}>
+                {conn.name}
               </Select.Option>
             ))}
           </Select>
@@ -602,14 +716,6 @@ const DatabaseViewer: React.FC = () => {
               >
                 {showTree ? "Show Flat List" : "Show Tree View"}
               </Button>
-              {showTree && (
-                <Input.Search
-                  placeholder="Search keys..."
-                  allowClear
-                  onChange={(e) => setSearchText(e.target.value)}
-                  style={{ width: 200 }}
-                />
-              )}
             </>
           )}
         </div>
@@ -617,94 +723,15 @@ const DatabaseViewer: React.FC = () => {
         {selectedConnection ? (
           <>
             {showTree ? (
-              <div style={{ 
-                backgroundColor: '#fff', 
-                padding: '16px', 
-                borderRadius: '4px',
-                border: '1px solid #f0f0f0',
-                maxHeight: '600px',
-                overflow: 'auto'
-              }}>
-                {isLoadingKeys ? (
-                  <div style={{ textAlign: 'center', padding: '20px' }}>
-                    Loading keys...
-                  </div>
-                ) : keys.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '20px' }}>
-                    No keys found
-                  </div>
-                ) : (
-                  <>
-                    <Tree
-                      treeData={filteredTreeData}
-                      expandedKeys={expandedKeys}
-                      autoExpandParent={autoExpandParent}
-                      onExpand={(keys) => {
-                        setExpandedKeys(keys as string[]);
-                        setAutoExpandParent(false);
-                      }}
-                      showLine
-                      icon={(props: any) => {
-                        if (props.isLeaf) {
-                          return <FileOutlined style={{ color: '#1890ff' }} />;
-                        }
-                        return <FolderOutlined style={{ color: '#faad14' }} />;
-                      }}
-                      titleRender={(node: any) => (
-                        <div style={{ 
-                          display: 'flex', 
-                          alignItems: 'center', 
-                          gap: '8px',
-                          padding: '4px 0'
-                        }}>
-                          <span style={{ 
-                            fontWeight: node.type === 'folder' ? 'bold' : 'normal',
-                            color: searchText && node.title.toLowerCase().includes(searchText.toLowerCase()) ? '#1890ff' : 'inherit'
-                          }}>
-                            {node.title}
-                          </span>
-                          {node.type !== 'folder' && (
-                            <>
-                              <span style={{ color: '#999', fontSize: '12px' }}>
-                                ({formatKeyType(node.type)})
-                              </span>
-                              <span style={{ color: '#999', fontSize: '12px' }}>
-                                {formatTTL(node.ttl)}
-                              </span>
-                              <Button
-                                danger
-                                size="small"
-                                icon={<DeleteOutlined />}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleDeleteKey(node.key);
-                                }}
-                              />
-                            </>
-                          )}
-                        </div>
-                      )}
-                      onSelect={(selectedKeys) => {
-                        if (selectedKeys.length > 0) {
-                          const key = selectedKeys[0] as string;
-                          handleKeySelect(key);
-                        }
-                      }}
-                    />
-                    {hasMore && (
-                      <div style={{ textAlign: 'center', marginTop: '16px' }}>
-                        <Button 
-                          type="primary" 
-                          onClick={() => loadKeys(true)}
-                          loading={isLoadingMore}
-                        >
-                          Load More
-                        </Button>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
+              <>
+                <Input.Search
+                  placeholder="Search keys..."
+                  allowClear
+                  onChange={(e) => setSearchText(e.target.value)}
+                  style={{ marginBottom: 16, width: 300 }}
+                />
+                {treeView}
+              </>
             ) : (
               <>
                 {isLoadingKeys ? (
@@ -723,17 +750,6 @@ const DatabaseViewer: React.FC = () => {
                       rowKey="key"
                       pagination={false}
                     />
-                    {hasMore && (
-                      <div style={{ textAlign: 'center', marginTop: '16px' }}>
-                        <Button 
-                          type="primary" 
-                          onClick={() => loadKeys(true)}
-                          loading={isLoadingMore}
-                        >
-                          Load More
-                        </Button>
-                      </div>
-                    )}
                   </>
                 )}
               </>
@@ -747,7 +763,28 @@ const DatabaseViewer: React.FC = () => {
                 setIsDetailModalVisible(false);
                 setSelectedKeyInfo(null);
               }}
-              footer={null}
+              footer={[
+                <Button
+                  key="delete"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={() => {
+                    handleDeleteKey(selectedKey);
+                    setIsDetailModalVisible(false);
+                  }}
+                  loading={isLoading}
+                >
+                  Delete Key
+                </Button>,
+                <Button
+                  key="edit"
+                  type="primary"
+                  onClick={handleEditValue}
+                  loading={isLoading}
+                >
+                  Edit Value
+                </Button>,
+              ]}
               width={800}
             >
               {selectedKeyInfo && keyValue && (
@@ -766,11 +803,6 @@ const DatabaseViewer: React.FC = () => {
                     }}>
                       {formatKeyValue(keyValue.value, keyValue.type)}
                     </pre>
-                  </div>
-                  <div style={{ marginTop: '16px', textAlign: 'right' }}>
-                    <Button type="primary" onClick={handleEditValue}>
-                      Edit Value
-                    </Button>
                   </div>
                 </div>
               )}

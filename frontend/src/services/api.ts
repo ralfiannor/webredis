@@ -30,14 +30,11 @@ export interface KeyListResponse {
   hasMore: boolean;
 }
 
-export const listKeys = async (connectionId: string, db: number, cursor: string = '0'): Promise<KeyListResponse> => {
+export const listKeys = async (connectionId: string, db: number, cursor: string = '0', batchSize: number = 100): Promise<KeyListResponse> => {
   try {
-    console.log('Fetching keys:', { connectionId, db, cursor }); // Debug log
-    const response = await api.get(`/keys/${connectionId}/${db}?cursor=${cursor}`);
-    console.log('API Response:', response.data); // Debug log
+    const response = await api.get(`/keys/${connectionId}/${db}?cursor=${cursor}&batchSize=${batchSize}`);
     return response.data;
   } catch (error) {
-    console.error('API Error:', error); // Debug log
     throw error;
   }
 };

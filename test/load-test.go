@@ -31,9 +31,9 @@ func main() {
 	}
 
 	// Generate and set keys
-	totalKeys := 100000
+	totalKeys := 300000
 	batchSize := 1000
-	ttl := 10 * time.Minute
+	ttl := 60 * time.Minute
 
 	// Create a pipeline for batch operations
 	pipe := client.Pipeline()
@@ -89,4 +89,4 @@ func main() {
 	log.Printf("Average time per key: %v", elapsed/time.Duration(totalKeys))
 
 	fmt.Println("\nNow run 'go run test/performance-test.go' to see the performance difference between SCAN and KEYS")
-} 
+}
