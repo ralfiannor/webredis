@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Card, Select, Table, Button, Modal, Form, Input, message, Space, Typography, Tree } from 'antd';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useTransition } from 'react';
+import { Card, Select, Table, Button, Modal, Form, Input, message, Space, Typography } from 'antd';
 import { DeleteOutlined, PlusOutlined, CodeOutlined, FolderOutlined, FileOutlined } from '@ant-design/icons';
+import { FixedSizeList as List } from 'react-window';
 import { listConnections, listDatabases, listKeys, getKey, setKey, deleteKey, executeCommand } from '../services/api';
 import { KeyValue, KeyInfo } from '../types';
 
@@ -172,7 +173,6 @@ const DatabaseViewer: React.FC = () => {
   const [isDetailModalVisible, setIsDetailModalVisible] = useState<boolean>(false);
   const [form] = Form.useForm();
   const [showTree, setShowTree] = useState<boolean>(true);
-  const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
   const [command, setCommand] = useState<string>('');
   const [commandArgs, setCommandArgs] = useState<string[]>(['']);
   const [commandResult, setCommandResult] = useState<any>(null);
@@ -182,9 +182,11 @@ const DatabaseViewer: React.FC = () => {
   const prevDatabaseRef = useRef<number | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const [cursor, setCursor] = useState<string>('0');
-  const [hasMore, setHasMore] = useState<boolean>(true);
   const [searchText, setSearchText] = useState<string>('');
   const [messageApi, contextHolder] = message.useMessage();
+
+  // Add state for tracking expanded folders
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
 
   // Optimize message handling with minimal updates
   const showMessage = useMemo(() => {
@@ -256,21 +258,35 @@ const DatabaseViewer: React.FC = () => {
 
   const loadKeys = async (loadMore: boolean = false) => {
     try {
+      console.log('Loading keys, loadMore:', loadMore, 'selectedConnection:', selectedConnection, 'selectedDatabase:', selectedDatabase);
       setIsLoadingKeys(true);
       const data = await listKeys(selectedConnection, selectedDatabase, loadMore ? cursor : '0', 1000);
+      console.log('Received keys data:', data);
+      
       if (!data || !data.keys) {
+        console.error('Invalid response format from server');
         showMessage.error('Invalid response format from server');
         return;
       }
 
+      console.log('Keys received from server:', data.keys.length);
+      console.log('Sample keys from server:', data.keys.slice(0, 5));
+
+      const newKeys = data.keys.map((key: any) => ({
+        key: key.key,
+        ttl: key.ttl,
+        type: key.type
+      }));
+
       if (loadMore) {
-        setKeys(prevKeys => [...prevKeys, ...data.keys]);
+        console.log('Appending more keys, current count:', keys.length, 'new keys:', newKeys.length);
+        setKeys(prevKeys => [...prevKeys, ...newKeys]);
       } else {
-        setKeys(data.keys);
+        console.log('Setting new keys, count:', newKeys.length);
+        setKeys(newKeys);
       }
 
       setCursor(data.nextCursor);
-      setHasMore(data.hasMore);
 
       if (selectedDatabase !== prevDatabaseRef.current) {
         setSelectedKey('');
@@ -278,6 +294,7 @@ const DatabaseViewer: React.FC = () => {
         prevDatabaseRef.current = selectedDatabase;
       }
     } catch (error: any) {
+      console.error('Error loading keys:', error);
       if (error.response?.status === 500) {
         showMessage.error('Connection error. Please check your Redis connection.');
         setConnections(prev => prev.filter(conn => conn.id !== selectedConnection));
@@ -468,131 +485,317 @@ const DatabaseViewer: React.FC = () => {
 
   // Add filtered keys based on search
   const filteredKeys = useMemo(() => {
+    console.log('Filtering keys, total keys:', keys.length, 'search text:', searchText);
     if (!searchText) return keys;
-    return keys.filter(key => 
+    const filtered = keys.filter(key => 
       key.key.toLowerCase().includes(searchText.toLowerCase())
     );
+    console.log('Filtered keys count:', filtered.length);
+    return filtered;
   }, [keys, searchText]);
 
-  // Memoize the tree data with optimized structure
-  const treeData = useMemo(() => {
-    const buildTree = (keys: KeyInfo[]): any[] => {
-      const tree: { [key: string]: any } = {};
+  // Build tree directly without worker
+  const buildTree = (keys: KeyInfo[]) => {
+    console.log('[Frontend] Building tree with keys:', keys);
+    
+    // Create a map to store nodes by their full path
+    const nodeMap = new Map<string, any>();
+    
+    // First pass: create all nodes
+    keys.forEach(key => {
+      if (!key || !key.key) return;
       
-      // Pre-allocate arrays for better performance
-      const keyArray = Array.isArray(keys) ? keys : [];
+      const parts = key.key.split(':');
+      let currentPath = '';
       
-      for (let i = 0; i < keyArray.length; i++) {
-        const key = keyArray[i];
-        const parts = key.key.split(':');
-        let current = tree;
-        let path = '';
+      parts.forEach((part, index) => {
+        currentPath = currentPath ? `${currentPath}:${part}` : part;
+        const isLast = index === parts.length - 1;
         
-        for (let j = 0; j < parts.length; j++) {
-          const part = parts[j];
-          path = path ? `${path}:${part}` : part;
-          const isLast = j === parts.length - 1;
-          
-          if (!current[part]) {
-            current[part] = {
-              title: isLast ? path : `${part} (0)`,
-              key: path,
-              isLeaf: isLast,
-              type: isLast ? key.type : 'folder',
-              ttl: isLast ? key.ttl : -1,
-              children: isLast ? undefined : {},
-              count: 0
-            };
-          } else if (!isLast) {
-            current[part].count++;
-          }
-          
-          if (!isLast) {
-            current = current[part].children;
-          }
-        }
-      }
-
-      const convertToArray = (obj: { [key: string]: any }): any[] => {
-        const result: any[] = [];
-        for (const [, value] of Object.entries(obj)) {
-          result.push({
-            ...value,
-            title: value.isLeaf ? value.title : `${value.title.split(' (')[0]} (${value.count} keys)`,
-            children: value.children ? convertToArray(value.children) : undefined
+        if (!nodeMap.has(currentPath)) {
+          nodeMap.set(currentPath, {
+            title: part,
+            key: currentPath,
+            isLeaf: isLast,
+            type: isLast ? key.type : 'folder',
+            ttl: isLast ? key.ttl : -1,
+            children: [],
+            count: 0,
+            hasChildren: !isLast,
+            isExpanded: false,
+            fullKey: isLast ? key.key : undefined
           });
         }
-        return result;
-      };
+      });
+    });
+    
+    console.log('[Frontend] Node map created:', Array.from(nodeMap.entries()));
+    
+    // Second pass: build the tree structure
+    const rootNodes: any[] = [];
+    
+    nodeMap.forEach((node, path) => {
+      const parts = path.split(':');
+      if (parts.length === 1) {
+        // This is a root node
+        rootNodes.push(node);
+      } else {
+        // This is a child node
+        const parentPath = parts.slice(0, -1).join(':');
+        const parent = nodeMap.get(parentPath);
+        if (parent) {
+          parent.children.push(node);
+          parent.count++;
+        }
+      }
+    });
+    
+    console.log('[Frontend] Tree structure built:', rootNodes);
+    
+    // Update titles with counts and full keys
+    const updateTitles = (nodes: any[]) => {
+      nodes.forEach(node => {
+        if (node.isLeaf) {
+          // For leaf nodes, show the full key and type
+          node.title = `${node.fullKey} (${node.type})`;
+        } else {
+          // For folders, show the count of all keys under this folder
+          const countKeys = (node: any): number => {
+            if (node.isLeaf) return 1;
+            return node.children.reduce((sum: number, child: any) => sum + countKeys(child), 0);
+          };
+          const totalKeys = countKeys(node);
+          node.title = `${node.title} (${totalKeys} keys)`;
+        }
+        if (node.children.length > 0) {
+          updateTitles(node.children);
+        }
+      });
+    };
+    
+    updateTitles(rootNodes);
+    console.log('[Frontend] Final tree structure:', JSON.stringify(rootNodes, null, 2));
+    return rootNodes;
+  };
 
-      return convertToArray(tree);
+  // Memoize the tree data
+  const [treeData, setTreeData] = useState<any[]>([]);
+  const [, startTransition] = useTransition();
+  const processingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const processData = () => {
+      if (processingRef.current) {
+        return;
+      }
+
+      try {
+        processingRef.current = true;
+        console.log('[Frontend] Processing filtered keys:', filteredKeys);
+        const result = buildTree(filteredKeys);
+        
+        if (isMounted) {
+          startTransition(() => {
+            console.log('[Frontend] Setting tree data:', result);
+            setTreeData(result);
+            // Initialize expanded folders with root nodes
+            const rootPaths = result.map(node => node.key);
+            setExpandedFolders(new Set(rootPaths));
+          });
+        }
+      } catch (error) {
+        console.error('[Frontend] Error processing tree data:', error);
+        if (isMounted) {
+          setTreeData([]);
+        }
+      } finally {
+        processingRef.current = false;
+      }
     };
 
-    return buildTree(filteredKeys);
+    if (filteredKeys.length > 0) {
+      console.log('[Frontend] Starting data processing with keys:', filteredKeys);
+      processData();
+    } else {
+      console.log('[Frontend] No keys to process');
+      setTreeData([]);
+    }
+
+    return () => {
+      isMounted = false;
+    };
   }, [filteredKeys]);
 
-  // Memoize the tree component with optimized event handling
-  const TreeComponent = useMemo(() => {
-    const handleExpand = useCallback((keys: React.Key[]) => {
-      setExpandedKeys(keys);
+  // Flatten the tree data for virtualized list
+  const flattenedData = useMemo(() => {
+    if (!treeData || !Array.isArray(treeData)) {
+      console.log('[Frontend] Invalid tree data:', treeData);
+      return [];
+    }
+
+    const flatten = (nodes: any[], level: number = 0, parentPath: string = ''): any[] => {
+      return nodes.reduce((acc: any[], node: any) => {
+        if (!node || typeof node !== 'object') {
+          console.log('[Frontend] Invalid node in flatten:', node);
+          return acc;
+        }
+
+        const path = parentPath ? `${parentPath}:${node.key}` : node.key;
+        const isExpanded = expandedFolders.has(path);
+        const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+
+        const flattenedNode = {
+          ...node,
+          level,
+          path,
+          isExpanded,
+          hasChildren,
+          children: undefined // Remove children from flattened node
+        };
+
+        acc.push(flattenedNode);
+
+        if (hasChildren && isExpanded) {
+          const childNodes = flatten(node.children, level + 1, path);
+          acc.push(...childNodes);
+        }
+
+        return acc;
+      }, []);
+    };
+
+    const result = flatten(treeData);
+    console.log('[Frontend] Tree View State:', {
+      totalKeys: keys.length,
+      treeNodes: treeData.length,
+      flattenedNodes: result.length,
+      expandedFolders: Array.from(expandedFolders).length,
+      firstNode: treeData[0],
+      flattenedData: JSON.stringify(result, null, 2)
+    });
+    return result;
+  }, [treeData, expandedFolders, keys.length]);
+
+  // Virtualized tree component
+  const VirtualizedTree = React.memo(({ data, onSelect }: any) => {
+    console.log('VirtualizedTree render, data length:', data.length);
+    console.log('First few items in VirtualizedTree:', data.slice(0, 5));
+    const rowHeight = 32;
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    const handleToggle = useCallback((path: string) => {
+      setExpandedFolders(prev => {
+        const next = new Set(prev);
+        if (next.has(path)) {
+          next.delete(path);
+        } else {
+          next.add(path);
+        }
+        return next;
+      });
     }, []);
 
+    const Row = useCallback(({ index, style }: { index: number; style: React.CSSProperties }) => {
+      const node = data[index];
+      if (!node) {
+        console.error('Invalid node at index:', index);
+        return null;
+      }
+
+      const paddingLeft = node.level * 20;
+
+      const handleClick = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (node.hasChildren) {
+          handleToggle(node.path);
+        } else {
+          onSelect([node.key], { node });
+        }
+      };
+
+      return (
+        <div
+          style={{
+            ...style,
+            display: 'flex',
+            alignItems: 'center',
+            paddingLeft: `${paddingLeft}px`,
+            cursor: 'pointer',
+            backgroundColor: index % 2 === 0 ? '#fafafa' : '#fff',
+          }}
+          onClick={handleClick}
+        >
+          {node.hasChildren ? (
+            <span 
+              style={{ 
+                marginRight: 8, 
+                width: 16, 
+                display: 'flex', 
+                alignItems: 'center',
+                cursor: 'pointer'
+              }}
+            >
+              {node.isExpanded ? '▼' : '▶'}
+            </span>
+          ) : (
+            <span style={{ marginRight: 8, width: 16 }} />
+          )}
+          {node.hasChildren ? (
+            <FolderOutlined style={{ color: '#faad14', marginRight: 8 }} />
+          ) : (
+            <FileOutlined style={{ color: '#1890ff', marginRight: 8 }} />
+          )}
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {node.title}
+          </span>
+        </div>
+      );
+    }, [data, onSelect, handleToggle]);
+
+    if (!data || data.length === 0) {
+      return (
+        <div style={{ textAlign: 'center', padding: '20px' }}>
+          No keys found
+        </div>
+      );
+    }
+
+    return (
+      <div
+        ref={containerRef}
+        style={{
+          height: '600px',
+          overflow: 'auto',
+          border: '1px solid #f0f0f0',
+          borderRadius: '4px',
+        }}
+      >
+        <List
+          height={600}
+          itemCount={data.length}
+          itemSize={rowHeight}
+          width="100%"
+        >
+          {Row}
+        </List>
+      </div>
+    );
+  });
+
+  // Optimize tree view container
+  const treeView = useMemo(() => {
+    console.log('Rendering tree view with flattenedData:', {
+      length: flattenedData.length,
+      sample: flattenedData.slice(0, 5)
+    });
+
     const handleSelect = useCallback((selectedKeys: React.Key[], info: any) => {
-      if (info.node.isLeaf) {
+      if (info.node && !info.node.hasChildren) {
         handleKeySelect(selectedKeys[0] as string);
       }
     }, [handleKeySelect]);
-
-    const handleTitleClick = useCallback((e: React.MouseEvent, nodeData: any) => {
-      e.stopPropagation();
-      if (nodeData.isLeaf) {
-        handleKeySelect(nodeData.key);
-      }
-    }, [handleKeySelect]);
-
-    return (
-      <Tree
-        treeData={treeData}
-        showLine={true}
-        blockNode={true}
-        expandedKeys={expandedKeys}
-        onExpand={handleExpand}
-        onSelect={handleSelect}
-        icon={(props: any) => {
-          if (props.isLeaf) {
-            return <FileOutlined style={{ color: '#1890ff' }} />;
-          }
-          return <FolderOutlined style={{ color: '#faad14' }} />;
-        }}
-        titleRender={(nodeData: any) => (
-          <span 
-            onClick={(e) => handleTitleClick(e, nodeData)}
-            style={{ 
-              cursor: 'pointer',
-              display: 'block',
-              width: '100%',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis'
-            }}
-          >
-            {nodeData.isLeaf ? nodeData.title : (
-              <>
-                {nodeData.title.split(' (')[0]}
-                <span style={{ color: '#999' }}> ({nodeData.count} keys)</span>
-              </>
-            )}
-          </span>
-        )}
-      />
-    );
-  }, [treeData, expandedKeys, handleKeySelect]);
-
-  // Optimize the tree view container with minimal re-renders
-  const treeView = useMemo(() => {
-    const handleLoadMore = useCallback(() => {
-      loadKeys(true);
-    }, [loadKeys]);
 
     return (
       <div 
@@ -626,35 +829,38 @@ const DatabaseViewer: React.FC = () => {
               top: 0,
               backgroundColor: '#fff',
               zIndex: 1,
-              padding: '8px 0'
+              padding: '8px 0',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
             }}>
-              Total Keys: {keys.length} scanned
+              <div>
+                Total Keys: {keys.length} scanned
+              </div>
+              <Button
+                type="primary"
+                onClick={() => loadKeys(true)}
+                loading={isLoadingKeys}
+                disabled={!cursor || cursor === '0'}
+              >
+                Scan More
+              </Button>
             </div>
-            {TreeComponent}
-            {hasMore && (
-              <div style={{ 
-                textAlign: 'left', 
-                marginTop: '16px',
-                position: 'sticky',
-                bottom: 0,
-                backgroundColor: '#fff',
-                zIndex: 1,
-                padding: '8px 0'
-              }}>
-                <Button 
-                  type="primary" 
-                  onClick={handleLoadMore}
-                  loading={isLoadingKeys}
-                >
-                  Scan More
-                </Button>
+            {flattenedData.length > 0 ? (
+              <VirtualizedTree
+                data={flattenedData}
+                onSelect={handleSelect}
+              />
+            ) : (
+              <div style={{ textAlign: 'center', padding: '20px' }}>
+                Processing tree data...
               </div>
             )}
           </>
         )}
       </div>
     );
-  }, [isLoadingKeys, keys.length, hasMore, TreeComponent, loadKeys]);
+  }, [flattenedData, handleKeySelect, isLoadingKeys, keys.length]);
 
   return (
     <div style={{ padding: '24px' }}>

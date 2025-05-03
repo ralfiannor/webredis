@@ -13,18 +13,22 @@
   "license": "ISC",
   "dependencies": {
     "@ant-design/icons": "^5.2.6",
+    "@koale/useworker": "^4.1.2",
     "@types/lodash": "^4.17.16",
     "antd": "^5.12.2",
     "axios": "^1.6.2",
     "lodash": "^4.17.21",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.20.0"
+    "react-router-dom": "^6.20.0",
+    "react-window": "^1.8.11"
   },
   "devDependencies": {
+    "@tanstack/react-virtual": "^3.13.6",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.38",
     "@types/react-dom": "^18.2.15",
+    "@types/react-window": "^1.8.8",
     "@vitejs/plugin-react": "^4.2.0",
     "typescript": "^5.2.2",
     "vite": "^6.3.4"

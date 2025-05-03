@@ -203,26 +203,32 @@ func listKeys(c *gin.Context) {
 	cursorStr := c.DefaultQuery("cursor", "0")
 	batchSizeStr := c.DefaultQuery("batchSize", "5000") // Increased default batch size
 
+	log.Printf("Listing keys for connection %s, database %s", id, db)
+
 	cursor, err := strconv.ParseUint(cursorStr, 10, 64)
 	if err != nil {
+		log.Printf("Invalid cursor value: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid cursor value"})
 		return
 	}
 
 	batchSize, err := strconv.ParseInt(batchSizeStr, 10, 64)
 	if err != nil {
+		log.Printf("Invalid batch size: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid batch size"})
 		return
 	}
 
 	client, exists := connections[id]
 	if !exists {
+		log.Printf("Connection not found: %s", id)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Connection not found"})
 		return
 	}
 
 	// Select database
 	if err := client.Do(c, "SELECT", db).Err(); err != nil {
+		log.Printf("Failed to select database: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to select database: %v", err)})
 		return
 	}
@@ -230,9 +236,12 @@ func listKeys(c *gin.Context) {
 	// Use SCAN with a larger count
 	keys, nextCursor, err := client.Scan(c, cursor, "*", batchSize).Result()
 	if err != nil {
+		log.Printf("Failed to scan keys: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to scan keys: %v", err)})
 		return
 	}
+
+	log.Printf("Found %d keys in database %s", len(keys), db)
 
 	// Get TTL and type for each key in parallel using goroutines
 	keyInfo := make([]map[string]interface{}, len(keys))
@@ -249,6 +258,8 @@ func listKeys(c *gin.Context) {
 	if keysPerWorker < 1 {
 		keysPerWorker = 1
 	}
+
+	log.Printf("Processing %d keys with %d workers", len(keys), workerCount)
 
 	for i := 0; i < len(keys); i += keysPerWorker {
 		end := i + keysPerWorker
@@ -287,10 +298,13 @@ func listKeys(c *gin.Context) {
 		case res := <-resultChan:
 			keyInfo[res.index] = res.info
 		case err := <-errorChan:
+			log.Printf("Error getting key info: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get key info: %v", err)})
 			return
 		}
 	}
+
+	log.Printf("Successfully processed %d keys", len(keyInfo))
 
 	// Return the response in the expected format
 	c.JSON(http.StatusOK, gin.H{

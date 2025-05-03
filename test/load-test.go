@@ -33,7 +33,7 @@ func main() {
 	// Generate and set keys
 	totalKeys := 300000
 	batchSize := 1000
-	ttl := 60 * time.Minute
+	ttl := 60 * time.Hour
 
 	// Create a pipeline for batch operations
 	pipe := client.Pipeline()
