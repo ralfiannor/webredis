@@ -8,7 +8,7 @@ import { KeyValue, KeyInfo } from '../types';
 const formatTTL = (ttl: number) => {
   if (ttl === -1) return 'No expiry';
   if (ttl === -2) return 'Error';
-  if (ttl < 0) return 'Persistent';
+  if (ttl < 0) return 'Forever';
   
   const days = Math.floor(ttl / 86400);
   const hours = Math.floor((ttl % 86400) / 3600);
@@ -184,9 +184,11 @@ const DatabaseViewer: React.FC = () => {
   const [cursor, setCursor] = useState<string>('0');
   const [searchText, setSearchText] = useState<string>('');
   const [messageApi, contextHolder] = message.useMessage();
-
-  // Add state for tracking expanded folders
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [treeData, setTreeData] = useState<any[]>([]);
+  const [flattenedData, setFlattenedData] = useState<any[]>([]);
+  const [, startTransition] = useTransition();
+  const processingRef = useRef<boolean>(false);
 
   // Optimize message handling with minimal updates
   const showMessage = useMemo(() => {
@@ -321,11 +323,61 @@ const DatabaseViewer: React.FC = () => {
         setSelectedKeyInfo(keyInfo);
         setIsDetailModalVisible(true);
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error.response?.status === 404) {
+        showMessage.error(`Key "${key}" does not exist`);
+        // Remove the key from the list while preserving expanded folders
+        setKeys(prevKeys => {
+          const newKeys = prevKeys.filter(k => k.key !== key);
+          // Rebuild tree with new keys but keep expanded folders
+          const newTreeData = buildTree(newKeys);
+          startTransition(() => {
+            setTreeData(newTreeData);
+            // Don't reset expanded folders
+          });
+          return newKeys;
+        });
+        setSelectedKey('');
+        setKeyValue(null);
+        setIsDetailModalVisible(false);
+      } else {
       showMessage.error('Failed to load key value');
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Helper function to flatten tree data
+  const flattenTreeData = (nodes: any[], level: number = 0, parentPath: string = ''): any[] => {
+    return nodes.reduce((acc: any[], node: any) => {
+      if (!node || typeof node !== 'object') {
+        console.log('[Frontend] Invalid node in flatten:', node);
+        return acc;
+      }
+
+      const path = parentPath ? `${parentPath}:${node.key}` : node.key;
+      const isExpanded = expandedFolders.has(path);
+      const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+
+      const flattenedNode = {
+        ...node,
+        level,
+        path,
+        isExpanded,
+        hasChildren,
+        children: undefined // Remove children from flattened node
+      };
+
+      acc.push(flattenedNode);
+
+      if (hasChildren && isExpanded) {
+        const childNodes = flattenTreeData(node.children, level + 1, path);
+        acc.push(...childNodes);
+      }
+
+      return acc;
+    }, []);
   };
 
   const handleDeleteKey = async (key: string) => {
@@ -494,6 +546,62 @@ const DatabaseViewer: React.FC = () => {
     return filtered;
   }, [keys, searchText]);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    const processData = () => {
+      if (processingRef.current) {
+        return;
+      }
+
+      try {
+        processingRef.current = true;
+        console.log('[Frontend] Processing filtered keys:', filteredKeys);
+        const result = buildTree(filteredKeys);
+        
+        if (isMounted) {
+          startTransition(() => {
+            console.log('[Frontend] Setting tree data:', result);
+            setTreeData(result);
+            // Only initialize expanded folders if it's empty
+            if (expandedFolders.size === 0) {
+              const rootPaths = result.map(node => node.key);
+              setExpandedFolders(new Set(rootPaths));
+            }
+          });
+        }
+      } catch (error) {
+        console.error('[Frontend] Error processing tree data:', error);
+        if (isMounted) {
+          setTreeData([]);
+        }
+      } finally {
+        processingRef.current = false;
+      }
+    };
+
+    if (filteredKeys.length > 0) {
+      console.log('[Frontend] Starting data processing with keys:', filteredKeys);
+      processData();
+    } else {
+      console.log('[Frontend] No keys to process');
+      setTreeData([]);
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [filteredKeys]);
+
+  useEffect(() => {
+    if (treeData.length > 0) {
+      const newFlattenedData = flattenTreeData(treeData);
+      setFlattenedData(newFlattenedData);
+    } else {
+      setFlattenedData([]);
+    }
+  }, [treeData, expandedFolders]);
+
   // Build tree directly without worker
   const buildTree = (keys: KeyInfo[]) => {
     console.log('[Frontend] Building tree with keys:', keys);
@@ -522,7 +630,7 @@ const DatabaseViewer: React.FC = () => {
             children: [],
             count: 0,
             hasChildren: !isLast,
-            isExpanded: false,
+            isExpanded: expandedFolders.has(currentPath),
             fullKey: isLast ? key.key : undefined
           });
         }
@@ -578,105 +686,93 @@ const DatabaseViewer: React.FC = () => {
     return rootNodes;
   };
 
-  // Memoize the tree data
-  const [treeData, setTreeData] = useState<any[]>([]);
-  const [, startTransition] = useTransition();
-  const processingRef = useRef<boolean>(false);
+  // Helper function to find a node by its path
+  const findNodeByPath = (nodes: any[], path: string): any => {
+    // Helper function to find node by path
+    const findNode = (currentNodes: any[], currentPath: string): any => {
+      // Try to find exact match first
+      const exactMatch = currentNodes.find(n => n.key === currentPath);
+      if (exactMatch) return exactMatch;
 
-  useEffect(() => {
-    let isMounted = true;
-
-    const processData = () => {
-      if (processingRef.current) {
-        return;
+      // If no exact match, try to find partial match
+      for (const node of currentNodes) {
+        if (currentPath.startsWith(node.key + ':')) {
+          if (node.children) {
+            return findNode(node.children, currentPath);
+          }
+        }
       }
+      return null;
+    };
 
-      try {
-        processingRef.current = true;
-        console.log('[Frontend] Processing filtered keys:', filteredKeys);
-        const result = buildTree(filteredKeys);
-        
-        if (isMounted) {
-          startTransition(() => {
-            console.log('[Frontend] Setting tree data:', result);
-            setTreeData(result);
-            // Initialize expanded folders with root nodes
-            const rootPaths = result.map(node => node.key);
-            setExpandedFolders(new Set(rootPaths));
+    return findNode(nodes, path);
+  };
+
+  const handleDeleteFolder = (folderPath: string) => {
+    // Count total keys under this folder
+    const countKeys = (node: any): number => {
+      if (node.isLeaf) return 1;
+      return node.children.reduce((sum: number, child: any) => sum + countKeys(child), 0);
+    };
+
+    console.log('Looking for folder:', folderPath);
+    console.log('Current tree data:', treeData);
+    
+    const folderNode = findNodeByPath(treeData, folderPath);
+    if (!folderNode) {
+      console.error('Folder not found:', folderPath);
+      return;
+    }
+
+    console.log('Found folder node:', folderNode);
+    const totalKeys = countKeys(folderNode);
+    
+    Modal.confirm({
+      title: 'Delete Folder',
+      content: `Are you sure you want to delete this folder? This will remove ${totalKeys} key${totalKeys === 1 ? '' : 's'}.`,
+      okText: 'Delete',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          setIsLoading(true);
+          // Get all keys under this folder
+          const keysToDelete = getAllKeysUnderFolder(folderNode);
+          console.log('Keys to delete:', keysToDelete);
+          
+          // Delete each key
+          for (const key of keysToDelete) {
+            await deleteKey(selectedConnection, selectedDatabase, key);
+          }
+          
+          showMessage.success(`Successfully deleted ${totalKeys} key${totalKeys === 1 ? '' : 's'}`);
+          
+          // Update the keys list and tree
+          setKeys(prevKeys => {
+            const newKeys = prevKeys.filter(k => !keysToDelete.includes(k.key));
+            const newTreeData = buildTree(newKeys);
+            startTransition(() => {
+              setTreeData(newTreeData);
+            });
+            return newKeys;
           });
+        } catch (error) {
+          console.error('Error deleting folder:', error);
+          showMessage.error('Failed to delete folder');
+        } finally {
+          setIsLoading(false);
         }
-      } catch (error) {
-        console.error('[Frontend] Error processing tree data:', error);
-        if (isMounted) {
-          setTreeData([]);
-        }
-      } finally {
-        processingRef.current = false;
       }
-    };
-
-    if (filteredKeys.length > 0) {
-      console.log('[Frontend] Starting data processing with keys:', filteredKeys);
-      processData();
-    } else {
-      console.log('[Frontend] No keys to process');
-      setTreeData([]);
-    }
-
-    return () => {
-      isMounted = false;
-    };
-  }, [filteredKeys]);
-
-  // Flatten the tree data for virtualized list
-  const flattenedData = useMemo(() => {
-    if (!treeData || !Array.isArray(treeData)) {
-      console.log('[Frontend] Invalid tree data:', treeData);
-      return [];
-    }
-
-    const flatten = (nodes: any[], level: number = 0, parentPath: string = ''): any[] => {
-      return nodes.reduce((acc: any[], node: any) => {
-        if (!node || typeof node !== 'object') {
-          console.log('[Frontend] Invalid node in flatten:', node);
-          return acc;
-        }
-
-        const path = parentPath ? `${parentPath}:${node.key}` : node.key;
-        const isExpanded = expandedFolders.has(path);
-        const hasChildren = Array.isArray(node.children) && node.children.length > 0;
-
-        const flattenedNode = {
-          ...node,
-          level,
-          path,
-          isExpanded,
-          hasChildren,
-          children: undefined // Remove children from flattened node
-        };
-
-        acc.push(flattenedNode);
-
-        if (hasChildren && isExpanded) {
-          const childNodes = flatten(node.children, level + 1, path);
-          acc.push(...childNodes);
-        }
-
-        return acc;
-      }, []);
-    };
-
-    const result = flatten(treeData);
-    console.log('[Frontend] Tree View State:', {
-      totalKeys: keys.length,
-      treeNodes: treeData.length,
-      flattenedNodes: result.length,
-      expandedFolders: Array.from(expandedFolders).length,
-      firstNode: treeData[0],
-      flattenedData: JSON.stringify(result, null, 2)
     });
-    return result;
-  }, [treeData, expandedFolders, keys.length]);
+  };
+
+  // Helper function to get all keys under a folder
+  const getAllKeysUnderFolder = (node: any): string[] => {
+    if (node.isLeaf) return [node.fullKey];
+    return node.children.reduce((keys: string[], child: any) => {
+      return [...keys, ...getAllKeysUnderFolder(child)];
+    }, []);
+  };
 
   // Virtualized tree component
   const VirtualizedTree = React.memo(({ data, onSelect }: any) => {
@@ -750,6 +846,18 @@ const DatabaseViewer: React.FC = () => {
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {node.title}
           </span>
+          {node.hasChildren && (
+            <Button
+              type="text"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteFolder(node.key);
+              }}
+              style={{ marginLeft: 8 }}
+            />
+          )}
         </div>
       );
     }, [data, onSelect, handleToggle]);
@@ -835,8 +943,8 @@ const DatabaseViewer: React.FC = () => {
               alignItems: 'center'
             }}>
               <div>
-                Total Keys: {keys.length} scanned
-              </div>
+              Total Keys: {keys.length} scanned
+            </div>
               <Button
                 type="primary"
                 onClick={() => loadKeys(true)}
@@ -847,10 +955,10 @@ const DatabaseViewer: React.FC = () => {
               </Button>
             </div>
             {flattenedData.length > 0 ? (
-              <VirtualizedTree
-                data={flattenedData}
-                onSelect={handleSelect}
-              />
+            <VirtualizedTree
+              data={flattenedData}
+              onSelect={handleSelect}
+            />
             ) : (
               <div style={{ textAlign: 'center', padding: '20px' }}>
                 Processing tree data...
@@ -969,27 +1077,33 @@ const DatabaseViewer: React.FC = () => {
                 setIsDetailModalVisible(false);
                 setSelectedKeyInfo(null);
               }}
-              footer={[
-                <Button
-                  key="delete"
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={() => {
-                    handleDeleteKey(selectedKey);
-                    setIsDetailModalVisible(false);
-                  }}
-                  loading={isLoading}
-                >
-                  Delete Key
+              footer={isEditing ? [
+                <Button key="cancel" onClick={handleCancelEdit}>
+                  Cancel
                 </Button>,
-                <Button
-                  key="edit"
-                  type="primary"
-                  onClick={handleEditValue}
-                  loading={isLoading}
-                >
-                  Edit Value
+                <Button key="save" type="primary" onClick={handleSaveValue} loading={isLoading}>
+                  Save
                 </Button>,
+              ] : [<Button
+                key="delete"
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => {
+                  handleDeleteKey(selectedKey);
+                  setIsDetailModalVisible(false);
+                }}
+                loading={isLoading}
+              >
+                Delete Key
+              </Button>,
+              <Button
+                key="edit"
+                type="primary"
+                onClick={handleEditValue}
+                loading={isLoading}
+              >
+                Edit Value
+              </Button>,
               ]}
               width={800}
             >
@@ -997,6 +1111,17 @@ const DatabaseViewer: React.FC = () => {
                 <div>
                   <p>Type: {formatKeyType(keyValue.type)}</p>
                   <p>TTL: {selectedKeyInfo.ttl > 0 ? <TTLCountdown initialTTL={selectedKeyInfo.ttl} /> : formatTTL(selectedKeyInfo.ttl)}</p>
+                  {isEditing ? 
+                  <Input.TextArea
+                  value={editedValue}
+                  onChange={(e) => setEditedValue(e.target.value)}
+                  autoSize={{ minRows: 4, maxRows: 10 }}
+                  style={{
+                    fontFamily: 'monospace',
+                    fontSize: '14px',
+                    lineHeight: '1.5',
+                  }}
+                  /> :
                   <div style={{ marginTop: '16px' }}>
                     <pre style={{ 
                       whiteSpace: 'pre-wrap',
@@ -1010,38 +1135,10 @@ const DatabaseViewer: React.FC = () => {
                       {formatKeyValue(keyValue.value, keyValue.type)}
                     </pre>
                   </div>
+                  }
                 </div>
               )}
             </Modal>
-
-            {/* Edit Value Modal */}
-            {isEditing && (
-              <Modal
-                title="Edit Value"
-                open={isEditing}
-                onCancel={handleCancelEdit}
-                footer={[
-                  <Button key="cancel" onClick={handleCancelEdit}>
-                    Cancel
-                  </Button>,
-                  <Button key="save" type="primary" onClick={handleSaveValue} loading={isLoading}>
-                    Save
-                  </Button>,
-                ]}
-                width={800}
-              >
-                <Input.TextArea
-                  value={editedValue}
-                  onChange={(e) => setEditedValue(e.target.value)}
-                  autoSize={{ minRows: 4, maxRows: 10 }}
-                  style={{
-                    fontFamily: 'monospace',
-                    fontSize: '14px',
-                    lineHeight: '1.5',
-                  }}
-                />
-              </Modal>
-            )}
           </>
         ) : (
           <div style={{ textAlign: 'center', padding: '20px' }}>

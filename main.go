@@ -330,6 +330,17 @@ func getKey(c *gin.Context) {
 		return
 	}
 
+	// Check if key exists first
+	existsCount, err := client.Exists(c, key).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to check key existence: %v", err)})
+		return
+	}
+	if existsCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Key '%s' does not exist", key)})
+		return
+	}
+
 	// Get key type
 	keyType, err := client.Type(c, key).Result()
 	if err != nil {
